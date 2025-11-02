@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  pdf-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdf-api
+    ports:
+      - "5018:8080"
+      - "5019:8081"
+    environment:
+      # ASP.NET Core
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
+      
+      # Database Connection
+      - ConnectionStrings__DefaultConnection=${DB_CONNECTION_STRING:-Server=sqlserver;Database=PdfApiLogs;User Id=sa;Password=YourStrong@Passw0rd;TrustServerCertificate=True}
+      
+      # AWS S3 Configuration
+      - AWS__AccessKey=${AWS_ACCESS_KEY:-}
+      - AWS__SecretKey=${AWS_SECRET_KEY:-}
+      - AWS__BucketName=${AWS_BUCKET_NAME:-amine-api}
+      - AWS__Region=${AWS_REGION:-eu-north-1}
+      
+      # PDF Settings
+      - PdfSettings__TempFolder=${PDF_TEMP_FOLDER:-/app/temp/pdfs}
+      - PdfSettings__LocalFallbackFolder=${PDF_FALLBACK_FOLDER:-/app/pdfs/fallback}
+      - PdfSettings__MaxFileSizeMb=${PDF_MAX_FILE_SIZE_MB:-100}
+      - PdfSettings__AutoCreateFolders=${PDF_AUTO_CREATE_FOLDERS:-true}
+      
+      # Logging
+      - Logging__LogLevel__Default=${LOG_LEVEL:-Information}
+      - Logging__LogLevel__Microsoft.AspNetCore=${LOG_LEVEL_ASPNET:-Warning}
+    
+    volumes:
+      # Persist PDF files
+      - pdf-temp:/app/temp/pdfs
+      - pdf-fallback:/app/pdfs/fallback
+    
+    networks:
+      - pdf-network
+    
+    restart: unless-stopped
+    
+    depends_on:
+      - sqlserver
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/s3/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # SQL Server for logging (optional - remove if using external DB)
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: pdf-sqlserver
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=${SQL_SA_PASSWORD:-YourStrong@Passw0rd}
+      - MSSQL_PID=Express
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    networks:
+      - pdf-network
+    restart: unless-stopped
+    healthcheck:
+      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$$SA_PASSWORD" -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pdf-temp:
+    driver: local
+  pdf-fallback:
+    driver: local
+  sqlserver-data:
+    driver: local
+
+networks:
+  pdf-network:
+    driver: bridge
