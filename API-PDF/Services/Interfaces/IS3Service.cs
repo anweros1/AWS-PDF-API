@@ -52,4 +52,12 @@ public interface IS3Service
     /// </summary>
     /// <returns>True if S3 is accessible</returns>
     Task<bool> IsS3AvailableAsync();
+
+    /// <summary>
+    /// List all files and folders in the S3 bucket as a tree structure
+    /// </summary>
+    /// <param name="prefix">Optional prefix to filter results (e.g., "folder1/")</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Tree structure of files and folders</returns>
+    Task<Models.DTOs.S3TreeResponse> ListBucketTreeAsync(string? prefix = null, CancellationToken cancellationToken = default);
 }

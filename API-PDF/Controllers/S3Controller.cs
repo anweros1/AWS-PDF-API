@@ -215,6 +215,34 @@ public class S3Controller : ControllerBase
             return StatusCode(500, new { Message = "Failed to delete file", Error = ex.Message });
         }
     }
+
+    /// <summary>
+    /// List all files and folders in the S3 bucket as a tree structure
+    /// </summary>
+    /// <param name="prefix">Optional prefix to filter results (e.g., "folder1/")</param>
+    /// <returns>Tree structure of files and folders</returns>
+    [HttpGet("tree")]
+    [ProducesResponseType(typeof(Models.DTOs.S3TreeResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> ListBucketTree([FromQuery] string? prefix = null)
+    {
+        try
+        {
+            // Check if S3 is available
+            if (!await _s3Service.IsS3AvailableAsync())
+            {
+                return StatusCode(503, new { Message = "S3 service is not available. Using local fallback storage." });
+            }
+
+            var tree = await _s3Service.ListBucketTreeAsync(prefix);
+            return Ok(tree);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to list S3 bucket tree");
+            return StatusCode(500, new { Message = "Failed to list bucket contents", Error = ex.Message });
+        }
+    }
 }
 
 /// <summary>

@@ -299,4 +299,174 @@ public class S3Service : IS3Service
             return false;
         }
     }
+
+    public async Task<Models.DTOs.S3TreeResponse> ListBucketTreeAsync(string? prefix = null, CancellationToken cancellationToken = default)
+    {
+        var response = new Models.DTOs.S3TreeResponse
+        {
+            BucketName = _awsSettings.BucketName,
+            Prefix = prefix
+        };
+
+        if (_useLocalFallback || _s3Client == null)
+        {
+            _logger.LogWarning("S3 not available, cannot list bucket tree");
+            return response;
+        }
+
+        try
+        {
+            var request = new ListObjectsV2Request
+            {
+                BucketName = _awsSettings.BucketName,
+                Prefix = prefix
+            };
+
+            var allObjects = new List<S3Object>();
+            ListObjectsV2Response s3Response;
+
+            // Paginate through all objects
+            do
+            {
+                s3Response = await _s3Client.ListObjectsV2Async(request, cancellationToken);
+                allObjects.AddRange(s3Response.S3Objects);
+                request.ContinuationToken = s3Response.NextContinuationToken;
+            }
+            while (s3Response.IsTruncated == true);
+
+            _logger.LogInformation("Retrieved {Count} objects from S3 bucket: {Bucket}", allObjects.Count, _awsSettings.BucketName);
+
+            // Build tree structure
+            var tree = BuildTree(allObjects, prefix);
+            
+            // Calculate statistics
+            response.Tree = tree;
+            response.TotalFiles = allObjects.Count(o => !o.Key.EndsWith('/'));
+            response.TotalSize = allObjects.Where(o => !o.Key.EndsWith('/')).Sum(o => (long)(o.Size ?? 0));
+            
+            // Count folders by unique prefixes
+            var folders = new HashSet<string>();
+            foreach (var obj in allObjects)
+            {
+                var parts = obj.Key.Split('/');
+                var currentPath = "";
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    currentPath += parts[i] + "/";
+                    folders.Add(currentPath);
+                }
+            }
+            response.TotalFolders = folders.Count;
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to list S3 bucket tree");
+            throw;
+        }
+    }
+
+    private List<Models.DTOs.S3TreeNode> BuildTree(List<S3Object> objects, string? prefix)
+    {
+        var rootNodes = new List<Models.DTOs.S3TreeNode>();
+        var folderMap = new Dictionary<string, Models.DTOs.S3TreeNode>();
+
+        // Remove prefix from paths if specified
+        var prefixLength = string.IsNullOrEmpty(prefix) ? 0 : prefix.Length;
+
+        foreach (var obj in objects)
+        {
+            var relativePath = obj.Key.Substring(prefixLength);
+            if (string.IsNullOrEmpty(relativePath)) continue;
+
+            var parts = relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var currentPath = prefix ?? "";
+            Models.DTOs.S3TreeNode? parentNode = null;
+
+            for (int i = 0; i < parts.Length; i++)
+            {
+                var part = parts[i];
+                currentPath += part;
+                var isLastPart = i == parts.Length - 1;
+
+                if (isLastPart && !obj.Key.EndsWith('/'))
+                {
+                    // This is a file
+                    var fileNode = new Models.DTOs.S3TreeNode
+                    {
+                        Name = part,
+                        Path = obj.Key,
+                        Type = "file",
+                        Size = obj.Size,
+                        LastModified = obj.LastModified
+                    };
+
+                    if (parentNode != null)
+                    {
+                        parentNode.Children.Add(fileNode);
+                        parentNode.ItemCount++;
+                    }
+                    else
+                    {
+                        rootNodes.Add(fileNode);
+                    }
+                }
+                else
+                {
+                    // This is a folder
+                    currentPath += "/";
+                    
+                    if (!folderMap.ContainsKey(currentPath))
+                    {
+                        var folderNode = new Models.DTOs.S3TreeNode
+                        {
+                            Name = part,
+                            Path = currentPath,
+                            Type = "folder",
+                            Children = new List<Models.DTOs.S3TreeNode>()
+                        };
+
+                        folderMap[currentPath] = folderNode;
+
+                        if (parentNode != null)
+                        {
+                            parentNode.Children.Add(folderNode);
+                        }
+                        else
+                        {
+                            rootNodes.Add(folderNode);
+                        }
+                    }
+
+                    parentNode = folderMap[currentPath];
+                }
+            }
+        }
+
+        // Calculate item counts for folders recursively
+        foreach (var node in rootNodes.Where(n => n.Type == "folder"))
+        {
+            CalculateItemCount(node);
+        }
+
+        return rootNodes;
+    }
+
+    private int CalculateItemCount(Models.DTOs.S3TreeNode node)
+    {
+        if (node.Type == "file")
+        {
+            return 1;
+        }
+
+        var count = 0;
+        foreach (var child in node.Children)
+        {
+            count += CalculateItemCount(child);
+        }
+
+        node.ItemCount = count;
+        return count;
+    }
 }

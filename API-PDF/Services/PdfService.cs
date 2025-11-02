@@ -261,6 +261,11 @@ public class PdfService : IPdfService
 
                 // Create output document
                 var outputDocument = new PdfDocument();
+                
+                // Track all keywords and bookmarks from all PDFs
+                var allKeywords = new List<string>();
+                var allBookmarks = new List<(string Title, int PageNumber)>();
+                int currentPageOffset = 0;
 
                 foreach (var pdfPath in pdfPaths)
                 {
@@ -268,6 +273,26 @@ public class PdfService : IPdfService
                     {
                         // Open source document
                         var inputDocument = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import);
+                        int pageCount = inputDocument.PageCount;
+                        
+                        // Extract keywords from this PDF
+                        if (inputDocument.Info.Keywords != null && !string.IsNullOrWhiteSpace(inputDocument.Info.Keywords))
+                        {
+                            var keywords = inputDocument.Info.Keywords.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                                .Select(k => k.Trim())
+                                .Where(k => !string.IsNullOrWhiteSpace(k));
+                            
+                            foreach (var keyword in keywords)
+                            {
+                                if (!allKeywords.Contains(keyword))
+                                {
+                                    allKeywords.Add(keyword);
+                                }
+                            }
+                        }
+                        
+                        // Extract bookmarks from this PDF and adjust page numbers
+                        ExtractBookmarksWithOffset(inputDocument.Outlines, allBookmarks, inputDocument, currentPageOffset);
                         
                         // Copy all pages from source to output
                         foreach (PdfPage page in inputDocument.Pages)
@@ -275,8 +300,11 @@ public class PdfService : IPdfService
                             outputDocument.AddPage(page);
                         }
                         
-                        _logger.LogDebug("Merged PDF: {PdfPath} ({PageCount} pages)", 
-                            pdfPath, inputDocument.PageCount);
+                        _logger.LogDebug("Merged PDF: {PdfPath} ({PageCount} pages, offset: {Offset})", 
+                            pdfPath, pageCount, currentPageOffset);
+                        
+                        // Update offset for next PDF
+                        currentPageOffset += pageCount;
                         
                         inputDocument.Dispose();
                     }
@@ -288,11 +316,41 @@ public class PdfService : IPdfService
                     }
                 }
 
+                // Add all collected keywords to merged document
+                if (allKeywords.Count > 0)
+                {
+                    outputDocument.Info.Keywords = string.Join(", ", allKeywords);
+                    _logger.LogDebug("Added {Count} keywords to merged PDF", allKeywords.Count);
+                }
+
+                // Add all collected bookmarks to merged document with adjusted page numbers
+                if (allBookmarks.Count > 0)
+                {
+                    foreach (var (title, pageNumber) in allBookmarks)
+                    {
+                        try
+                        {
+                            if (pageNumber > 0 && pageNumber <= outputDocument.PageCount)
+                            {
+                                var outline = outputDocument.Outlines.Add(title, outputDocument.Pages[pageNumber - 1], true);
+                                _logger.LogDebug("Added bookmark: '{Title}' -> Page {PageNumber}", title, pageNumber);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to add bookmark: {Title}", title);
+                        }
+                    }
+                    
+                    _logger.LogInformation("Added {Count} bookmarks to merged PDF", allBookmarks.Count);
+                }
+
                 // Save merged document
                 outputDocument.Save(outputPath);
                 outputDocument.Dispose();
 
-                _logger.LogInformation("Merged {Count} PDFs into: {OutputPath}", pdfPaths.Count, outputPath);
+                _logger.LogInformation("Merged {Count} PDFs into: {OutputPath} (Total pages: {TotalPages}, Keywords: {Keywords}, Bookmarks: {Bookmarks})", 
+                    pdfPaths.Count, outputPath, currentPageOffset, allKeywords.Count, allBookmarks.Count);
                 return true;
             }
             catch (Exception ex)
@@ -301,6 +359,57 @@ public class PdfService : IPdfService
                 return false;
             }
         });
+    }
+
+    private void ExtractBookmarksWithOffset(PdfOutlineCollection outlines, List<(string Title, int PageNumber)> bookmarks, PdfDocument document, int pageOffset)
+    {
+        if (outlines == null || outlines.Count == 0) return;
+
+        foreach (PdfOutline outline in outlines)
+        {
+            try
+            {
+                var title = outline.Title;
+                if (!string.IsNullOrWhiteSpace(title))
+                {
+                    // Try to get page number
+                    int pageNumber = 1; // default
+                    
+                    try
+                    {
+                        if (outline.DestinationPage != null)
+                        {
+                            // Find page index in source document
+                            for (int i = 0; i < document.Pages.Count; i++)
+                            {
+                                if (document.Pages[i] == outline.DestinationPage)
+                                {
+                                    pageNumber = i + 1; // Convert to 1-based
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Use default page number if extraction fails
+                    }
+                    
+                    // Add bookmark with adjusted page number (offset by previous PDFs)
+                    bookmarks.Add((title, pageNumber + pageOffset));
+                }
+
+                // Recursively process children
+                if (outline.Outlines != null && outline.Outlines.Count > 0)
+                {
+                    ExtractBookmarksWithOffset(outline.Outlines, bookmarks, document, pageOffset);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to extract bookmark with offset");
+            }
+        }
     }
 
     public async Task<int> GetPageCountAsync(string pdfPath)
